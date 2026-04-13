@@ -212,6 +212,8 @@ fn main() {
     let target_dir = get_cargo_target_dir().unwrap();
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("Failed to get CARGO_MANIFEST_DIR");
     let llama_src = Path::new(&manifest_dir).join("llama.cpp");
+    // Apply FGDN assertion patch for hybrid recurrent models (Gemma 4, Qwen 3.5)
+    patch_fgdn_assertion(&llama_src);
     let build_shared_libs = cfg!(feature = "dynamic-link");
 
     let build_shared_libs = std::env::var("LLAMA_BUILD_SHARED_LIBS")
@@ -1109,6 +1111,27 @@ fn main() {
             if !dst.exists() {
                 std::fs::hard_link(asset.clone(), dst).unwrap();
             }
+        }
+    }
+}
+
+// --- FGDN assertion patch for hybrid recurrent models ---
+// Applied at build time so the submodule stays pristine.
+fn patch_fgdn_assertion(llama_cpp_dir: &std::path::Path) {
+    let context_cpp = llama_cpp_dir.join("src/llama-context.cpp");
+    if let Ok(content) = std::fs::read_to_string(&context_cpp) {
+        let patched = content
+            .replace(
+                r#"GGML_ASSERT(strncmp(n->name, LLAMA_TENSOR_NAME_FGDN_AR "-", prefix_len) == 0);"#,
+                r#"if (strncmp(n->name, LLAMA_TENSOR_NAME_FGDN_AR "-", prefix_len) != 0) { LLAMA_LOG_WARN("%s: unexpected FGDN tensor name: %s, disabling fused GDN AR\n", __func__, n->name); cparams.fused_gdn_ar = false; break; }"#,
+            )
+            .replace(
+                r#"GGML_ASSERT(strncmp(n->name, LLAMA_TENSOR_NAME_FGDN_CH "-", prefix_len) == 0);"#,
+                r#"if (strncmp(n->name, LLAMA_TENSOR_NAME_FGDN_CH "-", prefix_len) != 0) { LLAMA_LOG_WARN("%s: unexpected FGDN tensor name: %s, disabling fused GDN CH\n", __func__, n->name); cparams.fused_gdn_ch = false; break; }"#,
+            );
+        if patched != content {
+            std::fs::write(&context_cpp, patched).ok();
+            println!("cargo:warning=Applied FGDN assertion patch for hybrid models");
         }
     }
 }
